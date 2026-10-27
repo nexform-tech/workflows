@@ -1,0 +1,28 @@
+name: CI
+
+# Lint the workflow files. Every NexForm repository calls the release workflow
+# in this repository, so a parse error here reaches all of them.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint workflows
+        uses: raven-actions/actionlint@v2

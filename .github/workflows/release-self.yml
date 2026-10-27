@@ -1,0 +1,54 @@
+name: Release Self
+
+# Dogfooding: this repository releases itself through the same reusable workflow
+# that downstream repositories call, then keeps the movable `v1` tag they pin to
+# pointing at the newest release.
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write # create the tag and the GitHub release
+  issues: write # comment on released issues
+  pull-requests: write # comment on released pull requests
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # never cancel a release mid-flight
+
+jobs:
+  release:
+    uses: ./.github/workflows/release.yml
+    with:
+      # No bootstrap tag: semantic-release's first release is 1.0.0, which is
+      # the line callers pin with `@v1`.
+      initial-version: ""
+
+  # Callers pin `@v1`; without this, every release would need a manual force-push
+  # and a forgotten one would silently pin downstream repositories to old logic.
+  # This job also proves that the `new_tag` output crosses the reusable-workflow
+  # boundary correctly.
+  major-tag:
+    needs: release
+    if: needs.release.outputs.new_tag != ''
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Point the major tag at the newest release
+        env:
+          NEW_TAG: ${{ needs.release.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          major="${NEW_TAG%%.*}"
+          git tag -f "$major" "$NEW_TAG"
+          git push -f origin "$major"
+          echo "moved $major to $NEW_TAG"
