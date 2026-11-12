@@ -83,7 +83,7 @@ jobs:
         if: inputs.initial-version != ''
         env:
           INITIAL_VERSION: ${{ inputs.initial-version }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # semantic-release's default tag format is `v${version}`.
@@ -97,12 +97,18 @@ jobs:
             exit 0
           fi
           root="$(git rev-list --max-parents=0 HEAD | tail -n 1)"
+          # The local tag is what semantic-release reads; the ref itself is
+          # created on GitHub through the API rather than `git push`. A pushed
+          # tag is checked for workflow-file changes, and GITHUB_TOKEN cannot
+          # carry the `workflows` permission, so a root commit whose
+          # `.github/workflows/` differs from the branch tip is rejected. The API
+          # transfers no objects, so that check does not apply.
+          # See nexform-tech/workflows#3.
           git tag "$tag" "$root"
-          # The checkout above runs with persist-credentials: false, so the push
-          # has to authenticate explicitly.
-          server="${GITHUB_SERVER_URL#https://}"
-          git push "https://x-access-token:${GITHUB_TOKEN}@${server}/${GITHUB_REPOSITORY}.git" \
-            "refs/tags/${tag}"
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+            --method POST \
+            -f "ref=refs/tags/${tag}" \
+            -f "sha=${root}" >/dev/null
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "bootstrapped ${tag} on the root commit ${root}"
 
