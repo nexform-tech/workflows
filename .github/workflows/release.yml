@@ -42,7 +42,7 @@ on:
       initial-version:
         description: >-
           Version of the one-time tag created when the repository has no release
-          tag yet: "0.0.0" starts the 0.x line, so the first feat is 0.1.0. Pass
+          tag yet: "0.0.0" starts the 0.x line, so the next feat is 0.1.0. Pass
           "" to skip the bootstrap and keep semantic-release's 1.0.0 first
           release.
         type: string
@@ -75,15 +75,16 @@ jobs:
           node-version: 22 # semantic-release 25 requires ^22.14.0 || >=24.10.0
 
       # The one-time starting point. Without it semantic-release would publish
-      # 1.0.0 for this push; with `v0.0.0` on the root commit it publishes 0.1.0
-      # for the first feature instead. A no-op as soon as any release tag exists,
-      # so it can never move a repository that is already on a version line.
+      # 1.0.0 for this push; with `v0.0.0` on HEAD the commits up to the tag are
+      # the baseline and the first feature after it publishes 0.1.0. A no-op as
+      # soon as any release tag exists, so it can never move a repository that
+      # is already on a version line.
       - name: Bootstrap the initial version tag
         id: bootstrap
         if: inputs.initial-version != ''
         env:
           INITIAL_VERSION: ${{ inputs.initial-version }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # semantic-release's default tag format is `v${version}`.
@@ -96,15 +97,20 @@ jobs:
             echo "a release tag already exists; nothing to bootstrap"
             exit 0
           fi
-          root="$(git rev-list --max-parents=0 HEAD | tail -n 1)"
-          git tag "$tag" "$root"
-          # The checkout above runs with persist-credentials: false, so the push
-          # has to authenticate explicitly.
-          server="${GITHUB_SERVER_URL#https://}"
-          git push "https://x-access-token:${GITHUB_TOKEN}@${server}/${GITHUB_REPOSITORY}.git" \
-            "refs/tags/${tag}"
+          head="$(git rev-parse HEAD)"
+          # Tag HEAD, not the root commit. GitHub rejects a new ref when the
+          # target commit's `.github/workflows/` differs from every branch tip,
+          # and GITHUB_TOKEN cannot carry the `workflows` permission. The refs
+          # API applies the same check, so a root commit whose workflow files
+          # were changed by a later commit is not an option.
+          # See nexform-tech/workflows#3.
+          git tag "$tag" "$head"
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+            --method POST \
+            -f "ref=refs/tags/${tag}" \
+            -f "sha=${head}" >/dev/null
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "bootstrapped ${tag} on the root commit ${root}"
+          echo "bootstrapped ${tag} on HEAD ${head}"
 
       - name: Release
         env:
@@ -121,9 +127,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)"
-          # In a repository whose whole history is a single commit, the bootstrap
-          # tag sits on HEAD and semantic-release had nothing to release. That tag
-          # is not a release, so never report it as one.
+          # The bootstrap tag sits on HEAD and semantic-release had nothing to
+          # release. That tag is not a release, so never report it as one.
           if [[ -n "$BOOTSTRAP_TAG" && "$tag" == "v${BOOTSTRAP_TAG#v}" ]]; then
             tag=""
           fi
