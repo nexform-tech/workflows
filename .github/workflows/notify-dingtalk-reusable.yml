@@ -26,5 +26,5 @@ jobs:
         env:
           DING_TOKEN: ${{ secrets.DING_TALK_TOKEN }}
           MEMBERS_JSON: ${{ secrets.NEXFORM_MEMBERS_JSON }}
-          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: python3 workflows/scripts/notify_dingtalk.py
