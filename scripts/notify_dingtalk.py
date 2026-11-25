@@ -20,7 +20,7 @@ DING_TOKEN = os.environ.get("DING_TOKEN", "")
 MEMBERS_JSON = os.environ.get("MEMBERS_JSON", "{}")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 EVENT_PATH = os.environ.get("GITHUB_EVENT_PATH", "")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
