@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""每天早报/晚报：从 Project #6 汇总未完成和当天完成的任务，发钉钉。
+"""每天早报/晚报：从 Project #6 汇总任务，发钉钉。
+
+早报/晚报用 markdown 卡片保证可读性；@ 人另发一条 text 消息，
+因为钉钉 markdown 的 @ 在手机端不高亮、不可点。
 
 环境变量：
   MODE            morning | evening
+  SCOPE           active | all（早报范围，默认 active）
   GH_TOKEN        NEXFORM_TOKEN（PAT，读 Project 和 issues）
   DING_TOKEN      钉钉自定义机器人 access_token
   MEMBERS_JSON    成员映射（name / dingtalk_userid / dingtalk_mobile）
@@ -21,7 +25,7 @@ TZ = ZoneInfo("Asia/Shanghai")
 NOW = datetime.now(TZ)
 TODAY = NOW.date()
 MODE = os.environ.get("MODE", "morning")
-SCOPE = os.environ.get("SCOPE", "active")  # active | all
+SCOPE = os.environ.get("SCOPE", "active")
 GH_TOKEN = os.environ.get("GH_TOKEN", "")
 DING_TOKEN = os.environ.get("DING_TOKEN", "")
 MEMBERS_JSON = os.environ.get("MEMBERS_JSON", "{}")
@@ -31,6 +35,7 @@ DRY_RUN = os.environ.get("DRY_RUN") == "1"
 PROJECT_URL = f"https://github.com/orgs/{OWNER}/projects/{NUMBER}"
 PRIO = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 STAT = {"In Progress": 0, "In Review": 1, "Blocked": 2, "Ready": 3}
+MAX_MD_BYTES = 3500
 
 
 def fail(message):
@@ -55,6 +60,15 @@ def real(login):
         return "未知用户"
     name = members.get(login, {}).get("name")
     return f"{name}（{login}）" if name else login
+
+
+def md_escape(text):
+    return (text or "").replace("[", "\\[").replace("]", "\\]")
+
+
+def cut(text, limit=80):
+    text = text or ""
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 def mention(logins):
@@ -123,23 +137,23 @@ def in_scope(item):
     return current or overdue
 
 
-def item_line(item):
+def task_line(item):
     content = item.get("content") or {}
     repo = content.get("repository", "")
     short = repo.split("/")[-1] if repo else ""
     iteration = (item.get("iteration") or {}).get("title") or "未排期"
     window = iteration_window(item)
-    overdue = "，逾期" if window and window[1] < TODAY else ""
+    overdue = " · ⚠️ 逾期" if window and window[1] < TODAY else ""
     return (
-        f"[{item.get('priority') or 'P2'}] "
-        f"{short}#{content.get('number')} {content.get('title', '')}"
-        f"（{item.get('status') or ''}，{iteration}{overdue}）"
+        f"- **{item.get('priority') or 'P2'}** "
+        f"[{md_escape(cut(content.get('title', '')))}]({content.get('url', '')})"
+        f" · {short}#{content.get('number')} · {item.get('status') or ''}"
+        f" · {iteration}{overdue}"
     )
 
 
 def morning():
-    groups = {}
-    unassigned = []
+    groups, unassigned = {}, []
     for item in project_items():
         content = item.get("content") or {}
         if content.get("type") != "Issue":
@@ -163,30 +177,33 @@ def morning():
             (it.get("content") or {}).get("number", 0),
         ))
 
-    lines = ["[NexForm] 早安，未完成任务", f"项目看板：{PROJECT_URL}", ""]
+    lines = [
+        f"## 🌅 NexForm 早安 · {TODAY}",
+        f"> 未完成任务 · [项目看板]({PROJECT_URL})",
+        "",
+    ]
     total = 0
     for login, items in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         total += len(items)
-        lines.append(f"{real(login)}：{len(items)} 项")
-        for item in items[:3]:
-            lines.append(f"- {item_line(item)}")
-        if len(items) > 3:
-            lines.append(f"- …还有 {len(items) - 3} 项")
+        lines.append(f"### 👤 {real(login)} · {len(items)} 项")
+        for item in items[:2]:
+            lines.append(task_line(item))
+        if len(items) > 2:
+            lines.append(f"- …还有 {len(items) - 2} 项")
         lines.append("")
 
     if unassigned:
-        lines.append(f"未分配：{len(unassigned)} 项")
-        for item in unassigned[:5]:
-            lines.append(f"- {item_line(item)}")
-        if len(unassigned) > 5:
-            lines.append(f"- …还有 {len(unassigned) - 5} 项")
+        lines.append(f"### 📌 未分配 · {len(unassigned)} 项")
+        for item in unassigned[:3]:
+            lines.append(task_line(item))
+        if len(unassigned) > 3:
+            lines.append(f"- …还有 {len(unassigned) - 3} 项")
         lines.append("")
 
     if total == 0 and not unassigned:
         lines.append("今天没有未完成任务。")
 
-    ids, mobiles, tokens, missing = mention(list(groups.keys()))
-    return lines, ids, mobiles, tokens, missing
+    return "\n".join(lines).rstrip(), "NexForm 早安 · 未完成任务", list(groups.keys())
 
 
 def evening():
@@ -222,63 +239,84 @@ def evening():
                 groups.setdefault(login, []).append(issue)
 
     lines = [
-        "[NexForm] 今日完成",
-        f"今日共完成 {len(completed)} 项。",
-        f"项目看板：{PROJECT_URL}",
+        f"## 🌙 NexForm 晚报 · {TODAY}",
+        f"> 今日完成 {len(completed)} 项 · [项目看板]({PROJECT_URL})",
         "",
     ]
     for login, issues in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
-        lines.append(f"{real(login)}：{len(issues)} 项")
-        for issue in issues[:5]:
+        lines.append(f"### 👤 {real(login)} · {len(issues)} 项")
+        for issue in issues[:3]:
             repo = (issue.get("repository") or {}).get("nameWithOwner", "")
             short = repo.split("/")[-1] if repo else ""
-            lines.append(f"- {short}#{issue.get('number')} {issue.get('title', '')}")
-        if len(issues) > 5:
-            lines.append(f"- …还有 {len(issues) - 5} 项")
+            closed = datetime.fromisoformat(
+                issue["closedAt"].replace("Z", "+00:00")
+            ).astimezone(TZ).strftime("%H:%M")
+            lines.append(
+                f"- [{md_escape(cut(issue.get('title', '')))}]({issue.get('url', '')})"
+                f" · {short}#{issue.get('number')} · {closed}"
+            )
+        if len(issues) > 3:
+            lines.append(f"- …还有 {len(issues) - 3} 项")
         lines.append("")
 
     if not completed:
         lines.append("今天没有完成记录。")
 
-    ids, mobiles, tokens, missing = mention(list(groups.keys()))
-    return lines, ids, mobiles, tokens, missing
+    return "\n".join(lines).rstrip(), "NexForm 晚报 · 今日完成", list(groups.keys())
 
 
-lines, ids, mobiles, tokens, missing = morning() if MODE == "morning" else evening()
+def cap_markdown(text):
+    raw = text.encode("utf-8")
+    if len(raw) <= MAX_MD_BYTES:
+        return text
+    return raw[:MAX_MD_BYTES].decode("utf-8", "ignore") + (
+        f"\n\n…完整内容请看[项目看板]({PROJECT_URL})"
+    )
+
+
+def send(payload, label):
+    if DRY_RUN:
+        print(f"=== {label} ===")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    token = urllib.parse.quote(DING_TOKEN, safe="")
+    url = f"https://oapi.dingtalk.com/robot/send?access_token={token}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        fail(f"{label} request failed: {type(exc).__name__}")
+    if data.get("errcode") != 0:
+        fail(f"{label} DingTalk error: {data}")
+    print(f"sent {label}")
+
+
+report_md, report_title, logins = morning() if MODE == "morning" else evening()
+report_md = cap_markdown(report_md)
+
+ids, mobiles, tokens, missing = mention(logins)
 if missing:
     print(f"缺少钉钉联系人: {','.join(missing)}", file=sys.stderr)
 
-body = "\n".join(lines).rstrip()
-mention_text = " ".join(tokens)
-if mention_text:
-    body = body[: max(0, 5000 - len(mention_text) - 2)]
-    body += "\n\n" + mention_text
-else:
-    body = body[:5000]
-
-payload = {
-    "msgtype": "text",
-    "text": {"content": body},
-    "at": {"atUserIds": ids, "atMobiles": mobiles, "isAtAll": False},
-}
-
-if DRY_RUN:
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    sys.exit(0)
-
-token = urllib.parse.quote(DING_TOKEN, safe="")
-url = f"https://oapi.dingtalk.com/robot/send?access_token={token}"
-req = urllib.request.Request(
-    url,
-    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-    headers={"Content-Type": "application/json"},
-    method="POST",
+send(
+    {"msgtype": "markdown", "markdown": {"title": report_title, "text": report_md}},
+    "report",
 )
-try:
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-except Exception as exc:
-    fail(f"DingTalk request failed: {type(exc).__name__}")
-if data.get("errcode") != 0:
-    fail(f"DingTalk error: {data}")
-print("sent")
+
+if ids or mobiles:
+    label = "早报" if MODE == "morning" else "晚报"
+    mention_text = f"[NexForm] {label}已更新，请查看上一条。\n\n" + " ".join(tokens)
+    send(
+        {
+            "msgtype": "text",
+            "text": {"content": mention_text},
+            "at": {"atUserIds": ids, "atMobiles": mobiles, "isAtAll": False},
+        },
+        "mentions",
+    )
