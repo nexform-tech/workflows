@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""GitHub event -> DingTalk 自定义机器人，带 login -> 真实姓名映射。
+"""GitHub event -> DingTalk 自定义机器人，带真实姓名和 @ 人。
 
-在 workflow 里通过环境变量传入：
+环境变量：
   DING_TOKEN             自定义机器人 access_token
-  MEMBERS_JSON           {"login": {"name": "真实姓名"}}
-  GITHUB_EVENT_NAME      由 GitHub 自动提供
-  GITHUB_EVENT_PATH      由 GitHub 自动提供
+  MEMBERS_JSON           成员与负责人配置，见 README
+  GITHUB_EVENT_NAME      GitHub 自动提供
+  GITHUB_EVENT_PATH      GitHub 自动提供
   DRY_RUN=1              只打印消息，不发送（本地测试用）
 """
 import json
@@ -38,9 +38,17 @@ except Exception as exc:
     fail(f"cannot read event: {type(exc).__name__}")
 
 try:
-    members = json.loads(MEMBERS_JSON or "{}")
+    raw_config = json.loads(MEMBERS_JSON or "{}")
 except Exception:
     fail("MEMBERS_JSON is not valid JSON")
+
+# 兼容老格式：{"login": {"name": ...}}
+if "members" in raw_config or "owners" in raw_config:
+    members = raw_config.get("members", {})
+    owners_map = raw_config.get("owners", {})
+else:
+    members = raw_config
+    owners_map = {}
 
 
 def real(login):
@@ -55,8 +63,34 @@ def cut(text, limit=200):
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
-repo = (event.get("repository") or {}).get("full_name", "")
-default_branch = (event.get("repository") or {}).get("default_branch", "main")
+def mention(logins):
+    """返回 atUserIds、atMobiles、正文里的 @ 文本、缺联系人。"""
+    ids, mobiles, tokens, missing = [], [], [], []
+    seen = set()
+    for login in logins:
+        if not login or login in seen or login.endswith("[bot]"):
+            continue
+        seen.add(login)
+        info = members.get(login, {})
+        userid = info.get("dingtalk_userid")
+        mobile = info.get("dingtalk_mobile")
+        if userid:
+            ids.append(userid)
+            tokens.append(f"@{userid}")
+        elif mobile:
+            mobiles.append(mobile)
+            tokens.append(f"@{mobile}")
+        else:
+            missing.append(login)
+            tokens.append(f"@{login}")
+    return ids, mobiles, tokens, missing
+
+
+repo_obj = event.get("repository") or {}
+repo_full = repo_obj.get("full_name", "")
+repo_name = repo_obj.get("name", "")
+default_branch = repo_obj.get("default_branch", "main")
+owners = owners_map.get(repo_name) or owners_map.get(repo_full) or []
 
 
 def build():
@@ -66,12 +100,15 @@ def build():
         actor = real((event.get("sender") or {}).get("login"))
         author = real((issue.get("user") or {}).get("login"))
         people = f"操作人：{actor}" if author == actor else f"作者：{author}\n操作人：{actor}"
-        return f"Issue {action}", (
-            f"### 📌 Issue {action}\n"
-            f"**#{issue.get('number')} {cut(issue.get('title'))}**\n"
-            f"仓库：{repo}\n{people}\n状态：{issue.get('state', '')}\n"
-            f"[查看]({issue.get('html_url', '')})"
-        )
+        text = "\n".join([
+            f"[NexForm] Issue {action}",
+            f"#{issue.get('number')} {cut(issue.get('title'))}",
+            f"仓库：{repo_full}",
+            people,
+            f"状态：{issue.get('state', '')}",
+            f"链接：{issue.get('html_url', '')}",
+        ])
+        return text
 
     if EVENT_NAME == "issue_comment":
         issue = event.get("issue") or {}
@@ -79,12 +116,13 @@ def build():
             return None
         comment = event.get("comment") or {}
         author = real((comment.get("user") or {}).get("login"))
-        return "Issue 新评论", (
-            f"### 💬 Issue 新评论\n"
-            f"**#{issue.get('number')} {cut(issue.get('title'))}**\n"
-            f"仓库：{repo}\n评论人：{author}\n"
-            f"[查看]({comment.get('html_url', '')})"
-        )
+        return "\n".join([
+            "[NexForm] Issue 新评论",
+            f"#{issue.get('number')} {cut(issue.get('title'))}",
+            f"仓库：{repo_full}",
+            f"评论人：{author}",
+            f"链接：{comment.get('html_url', '')}",
+        ])
 
     if EVENT_NAME == "pull_request":
         action = event.get("action", "")
@@ -94,12 +132,13 @@ def build():
         actor = real((event.get("sender") or {}).get("login"))
         author = real((pr.get("user") or {}).get("login"))
         people = f"操作人：{actor}" if author == actor else f"作者：{author}\n操作人：{actor}"
-        return f"PR {action}", (
-            f"### 🔀 PR {action}\n"
-            f"**#{pr.get('number')} {cut(pr.get('title'))}**\n"
-            f"仓库：{repo}\n{people}\n"
-            f"[查看]({pr.get('html_url', '')})"
-        )
+        return "\n".join([
+            f"[NexForm] PR {action}",
+            f"#{pr.get('number')} {cut(pr.get('title'))}",
+            f"仓库：{repo_full}",
+            people,
+            f"链接：{pr.get('html_url', '')}",
+        ])
 
     if EVENT_NAME == "push":
         ref = event.get("ref", "")
@@ -107,37 +146,50 @@ def build():
             return None
         actor = real((event.get("sender") or {}).get("login"))
         commits = event.get("commits") or []
-        return "Push", (
-            f"### 🚀 Push\n"
-            f"仓库：{repo}\n分支：{ref.replace('refs/heads/', '')}\n"
-            f"推送人：{actor}\n提交数：{len(commits)}\n"
-            f"[查看]({event.get('compare', '')})"
-        )
+        return "\n".join([
+            "[NexForm] Push",
+            f"仓库：{repo_full}",
+            f"分支：{ref.replace('refs/heads/', '')}",
+            f"推送人：{actor}",
+            f"提交数：{len(commits)}",
+            f"链接：{event.get('compare', '')}",
+        ])
 
     return None
 
 
-built = build()
-if not built:
+body = build()
+if not body:
     print("ignored")
     sys.exit(0)
 
-title, text = built
-text += "\n\n_NexForm GitHub 通知_"
+actor_login = (event.get("sender") or {}).get("login", "")
+ids, mobiles, tokens, missing = mention(list(owners) + [actor_login])
+if missing:
+    print(f"缺少钉钉联系人: {','.join(missing)}", file=sys.stderr)
+if tokens:
+    body += "\n\n" + " ".join(tokens)
+
+body = body[:5000]
+payload = {
+    "msgtype": "text",
+    "text": {"content": body},
+    "at": {
+        "atUserIds": ids,
+        "atMobiles": mobiles,
+        "isAtAll": False,
+    },
+}
 
 if DRY_RUN:
-    print(json.dumps({"title": title, "text": text}, ensure_ascii=False, indent=2))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     sys.exit(0)
 
-payload = json.dumps(
-    {"msgtype": "markdown", "markdown": {"title": title, "text": text}},
-    ensure_ascii=False,
-).encode("utf-8")
 token = urllib.parse.quote(DING_TOKEN, safe="")
 url = f"https://oapi.dingtalk.com/robot/send?access_token={token}"
 request = urllib.request.Request(
     url,
-    data=payload,
+    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
     headers={"Content-Type": "application/json"},
     method="POST",
 )
