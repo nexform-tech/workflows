@@ -1,0 +1,30 @@
+name: NexForm morning report
+
+on:
+  schedule:
+    # 09:00 Asia/Shanghai, weekdays
+    - cron: "0 1 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: nexform-tech/workflows
+          path: workflows
+          sparse-checkout: scripts
+
+      - name: Send morning report
+        env:
+          GH_TOKEN: ${{ secrets.NEXFORM_TOKEN }}
+          DING_TOKEN: ${{ secrets.DING_TALK_TOKEN }}
+          MEMBERS_JSON: ${{ secrets.NEXFORM_MEMBERS_JSON }}
+          MODE: morning
+          SCOPE: active
+        run: python3 workflows/scripts/daily_report.py
