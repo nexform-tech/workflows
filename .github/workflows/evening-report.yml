@@ -1,9 +1,6 @@
 name: NexForm evening report
 
 on:
-  schedule:
-    # 18:30 Asia/Shanghai, weekdays
-    - cron: "30 10 * * 1-5"
   workflow_dispatch:
 
 permissions:
