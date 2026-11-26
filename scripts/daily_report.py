@@ -26,6 +26,11 @@ PR review、issue/PR 评论、发布 release）。
   DING_TOKEN      钉钉自定义机器人 access_token
   MEMBERS_JSON    成员映射（name / dingtalk_userid / dingtalk_mobile）
   DRY_RUN=1       只打印 payload，不发送
+  FORCE_SEND=1    绕过发送时间窗（手动补发用）
+
+GitHub 的 schedule 可能延迟数小时。脚本只在预期窗口内发送：
+早报 08:30-10:30、晚报 18:00-20:30（Asia/Shanghai），超出窗口直接跳过。
+workflow_dispatch、DRY_RUN、FORCE_SEND 会绕过这个检查。
 """
 import json
 import os
@@ -72,6 +77,19 @@ try:
     SEND_INTERVAL = max(0.0, float(os.environ.get("SEND_INTERVAL", "3.2")))
 except ValueError:
     SEND_INTERVAL = 3.2
+FORCE_SEND = os.environ.get("FORCE_SEND") == "1"
+
+
+def within_window():
+    """GitHub schedule 可能延迟数小时，只在预期窗口内发送。"""
+    if DRY_RUN or FORCE_SEND:
+        return True
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        return True
+    minutes = NOW.hour * 60 + NOW.minute
+    if MODE == "morning":
+        return 8 * 60 + 30 <= minutes <= 10 * 60 + 30
+    return 18 * 60 <= minutes <= 20 * 60 + 30
 
 
 def fail(message):
@@ -160,6 +178,22 @@ def api_get(path, default=None):
         return json.loads(p.stdout or "null")
     except Exception:
         return default
+
+
+def org_members():
+    """当前组织成员 login 集合；取不到时返回空集，报告不过滤。"""
+    found = set()
+    for page in range(1, 11):
+        batch = api_get(
+            f"orgs/{OWNER}/members?per_page=100&page={page}", [],
+        ) or []
+        for user in batch:
+            login = login_of(user)
+            if login:
+                found.add(login.lower())
+        if len(batch) < 100:
+            break
+    return found
 
 
 ISSUE_FIELDS = (
@@ -288,12 +322,20 @@ def board_data():
 def morning():
     """每人一份早报：看板任务 + 全组织待办。"""
     board, board_urls = board_data()
+    current = org_members()
+
+    def allowed(login):
+        return not current or (login or "").lower() in current
+
+    board = {
+        login: items for login, items in board.items() if allowed(login)
+    }
     todos = {}
     seen = {}
 
     def add(login, kind, title, url, ref, extra=""):
         login = human(login)
-        if not login or not url:
+        if not login or not url or not allowed(login):
             return
         urls = seen.setdefault(login, set())
         if url in urls:
@@ -324,7 +366,7 @@ def morning():
 
     candidates = set(board) | set(todos) | set(members)
     for login in sorted(candidates):
-        if is_bot(login):
+        if is_bot(login) or not allowed(login):
             continue
         for pr in search_prs(
             "--state", "open", "--review-requested", login,
@@ -695,6 +737,13 @@ def send(payload, label):
     print(f"sent {label}")
     return True
 
+
+if not within_window():
+    print(
+        f"outside {MODE} window at {NOW:%H:%M} Asia/Shanghai; skipping",
+        file=sys.stderr,
+    )
+    sys.exit(0)
 
 reports = morning() if MODE == "morning" else evening()
 if not reports:
